@@ -1,5 +1,5 @@
-import os, sys, io, time, asyncio, threading
-import pytesseract, psutil, requests
+import os, sys, io, time, asyncio, threading, math
+import pytesseract, psutil
 import speech_recognition as sr
 from pydub import AudioSegment
 from PIL import Image
@@ -8,20 +8,20 @@ from flask import Flask, render_template_string, redirect, request, session
 from pyrogram import Client, filters
 from config import Config
 
-# --- 1. Global State ---
+# --- 1. GLOBAL STATE & CACHE ---
 bot_state = {
     "start_time": time.time(),
     "stremio_scrapes": 0,
     "afk_general": False,
     "focus_coding": False,
-    "status_message": ""
+    "status_message": "",
+    "sniper_keywords": []
 }
 
-# --- Ghost Logger Cache & Safety Lock ---
 message_cache = {}
 log_lock = asyncio.Lock()
 
-# --- 2. Secure Web Server ---
+# --- 2. SECURE WEB SERVER ---
 web_app = Flask(__name__)
 web_app.secret_key = Config.FLASK_SECRET
 
@@ -120,84 +120,162 @@ def toggle(feature):
 def run_flask():
     web_app.run(host="0.0.0.0", port=Config.PORT)
 
-# --- 3. Telegram Userbot ---
+# --- 3. TELEGRAM USERBOT ---
 bot = Client("my_userbot", session_string=Config.SESSION_STRING, api_id=Config.API_ID, api_hash=Config.API_HASH)
 
-# --- GHOST LOGGER MODULE (Safe Mode) ---
+# --- HELPER: SMART PROGRESS TRACKER ---
+async def progress_tracker(current, total, message, action, start_time):
+    now = time.time()
+    diff = now - start_time
+    if getattr(message, "last_edit_time", 0) + 3 < now or current == total:
+        message.last_edit_time = now
+        percent = round(current * 100 / total, 1) if total else 0
+        speed = round((current / diff) / (1024 * 1024), 2) if diff > 0 else 0
+        current_mb = round(current / (1024 * 1024), 2)
+        total_mb = round(total / (1024 * 1024), 2)
+        filled = int(percent / 10)
+        bar = "█" * filled + "▒" * (10 - filled)
+        
+        text = (
+            f"⏳ **{action}...**\n"
+            f"[{bar}] `{percent}%`\n"
+            f"📦 **Size:** `{current_mb} MB / {total_mb} MB`\n"
+            f"🚀 **Speed:** `{speed} MB/s`"
+        )
+        try:
+            await message.edit_text(text)
+        except Exception:
+            pass
+
+# --- AUTO VIEW-ONCE BYPASS ---
+@bot.on_message(filters.private & ~filters.me & (filters.photo | filters.video | filters.animation), group=3)
+async def auto_view_once(client, message):
+    media = message.photo or message.video or message.animation
+    if getattr(media, "ttl_seconds", None):
+        file_path = None
+        sender = message.from_user.first_name if message.from_user else "Unknown"
+        try:
+            file_path = await message.download()
+            caption = f"🚨 **AUTO-INTERCEPT: View-Once Media**\n👤 **Target:** {sender}\n⏳ **Timer:** `{media.ttl_seconds}s`"
+            if message.photo:
+                await client.send_photo(Config.LOG_CHANNEL_ID, file_path, caption=caption)
+            else:
+                await client.send_video(Config.LOG_CHANNEL_ID, file_path, caption=caption)
+        except Exception as e:
+            await client.send_message(Config.LOG_CHANNEL_ID, f"❌ Failed to intercept view-once: {str(e)}")
+        finally:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+
+# --- THE KEYWORD SNIPER ---
+@bot.on_message(filters.me & filters.command("sniper", prefixes="."))
+async def sniper_control(client, message):
+    if len(message.command) < 2:
+        return await message.edit_text("🎯 **Sniper:**\n`.sniper add [word]`\n`.sniper rm [word]`\n`.sniper list`")
+    action = message.command[1].lower()
+    if action == "add" and len(message.command) > 2:
+        word = message.text.split(" ", 2)[2].lower()
+        if word not in bot_state["sniper_keywords"]: bot_state["sniper_keywords"].append(word)
+        await message.edit_text(f"🎯 **Sniper:** Added `{word}`")
+    elif action == "rm" and len(message.command) > 2:
+        word = message.text.split(" ", 2)[2].lower()
+        if word in bot_state["sniper_keywords"]: bot_state["sniper_keywords"].remove(word)
+        await message.edit_text(f"🎯 **Sniper:** Removed `{word}`")
+    elif action == "list":
+        words = ", ".join(bot_state["sniper_keywords"]) or "No targets set."
+        await message.edit_text(f"🎯 **Active Sniper Targets:**\n`{words}`")
+
+@bot.on_message(filters.group & filters.text & ~filters.me, group=4)
+async def sniper_listener(client, message):
+    if not bot_state["sniper_keywords"]: return
+    text_lower = message.text.lower()
+    for kw in bot_state["sniper_keywords"]:
+        if kw in text_lower:
+            sender = message.from_user.first_name if message.from_user else "Unknown"
+            link = message.link if message.link else "No Link"
+            alert = f"🎯 **SNIPER HIT: `{kw}`**\n🏢 **Group:** {message.chat.title}\n👤 **User:** {sender}\n\n💬 `{message.text}`\n\n🔗 [Jump]({link})"
+            try:
+                await client.send_message(Config.LOG_CHANNEL_ID, alert, disable_web_page_preview=True)
+            except Exception: pass
+            break
+
+# --- GHOST LOGGER (Safe Mode) ---
 @bot.on_message(filters.private & filters.text, group=-1)
 async def cache_pms(client, message):
     if message.from_user and not message.from_user.is_self:
         message_cache[message.id] = {
-            "text": message.text,
-            "from_user": message.from_user.first_name,
-            "time": time.strftime('%Y-%m-%d %H:%M:%S')
+            "text": message.text, "from_user": message.from_user.first_name, "time": time.strftime('%Y-%m-%d %H:%M:%S')
         }
-        if len(message_cache) > 150: # Keeps memory usage extremely low
-            message_cache.pop(next(iter(message_cache)))
+        if len(message_cache) > 150: message_cache.pop(next(iter(message_cache)))
 
 @bot.on_deleted_messages(filters.private)
 async def log_deleted(client, messages):
     async with log_lock:
         for msg in messages:
             if msg.id in message_cache:
-                cached = message_cache[msg.id]
-                log_text = (
-                    f"👻 **DELETED PM INTERCEPTED**\n"
-                    f"👤 **From:** {cached['from_user']}\n"
-                    f"⏰ **Sent at:** {cached['time']}\n\n"
-                    f"💬 `{cached['text']}`"
-                )
+                c = message_cache[msg.id]
                 try:
-                    await client.send_message(Config.LOG_CHANNEL_ID, log_text)
-                except Exception:
-                    pass
-                await asyncio.sleep(1.5) # SAFETY PAUSE: 1.5s delay to prevent flood bans
+                    await client.send_message(Config.LOG_CHANNEL_ID, f"👻 **DELETED PM**\n👤 **From:** {c['from_user']}\n⏰ **At:** {c['time']}\n\n💬 `{c['text']}`")
+                except Exception: pass
+                await asyncio.sleep(1.5)
 
-# --- SYSTEM HEALTH MODULE ---
+# --- RESTRICTED CONTENT SAVER (.dl) ---
+@bot.on_message(filters.me & filters.command("dl", prefixes="."))
+async def save_restricted(client, message):
+    if not message.reply_to_message or not message.reply_to_message.media:
+        return await message.edit_text("⚠️ Reply to restricted media with `.dl`")
+    
+    status_msg = await message.edit_text("📥 Initializing download...")
+    start_time = time.time()
+    try:
+        file_path = await message.reply_to_message.download(progress=progress_tracker, progress_args=(status_msg, "Downloading", start_time))
+        if not file_path: return await status_msg.edit_text("❌ Failed to download.")
+        
+        await status_msg.edit_text("📤 Uploading to Log Channel...")
+        start_time, status_msg.last_edit_time = time.time(), 0
+        
+        await client.send_document(
+            chat_id=Config.LOG_CHANNEL_ID, document=file_path, caption="🔓 **Restricted File Unlocked**",
+            progress=progress_tracker, progress_args=(status_msg, "Uploading", start_time)
+        )
+        await status_msg.edit_text("✅ **Success!** Saved in Log Channel.")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
+    finally:
+        if 'file_path' in locals() and file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
+# --- SYSTEM HEALTH (.sys) ---
 @bot.on_message(filters.me & filters.command("sys", prefixes="."))
 async def system_health(client, message):
-    cpu = psutil.cpu_percent(interval=0.5)
-    ram = psutil.virtual_memory().percent
-    disk = psutil.disk_usage('/').percent
-    stats = (
+    await message.edit_text(
         f"🖥 **Server Health Matrix**\n\n"
-        f"🧠 **CPU Usage:** `{cpu}%`\n"
-        f"💽 **RAM Usage:** `{ram}%`\n"
-        f"💾 **Disk Usage:** `{disk}%`\n\n"
-        f"🛡 **System:** `Render Docker`"
+        f"🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n"
+        f"💽 **RAM:** `{psutil.virtual_memory().percent}%`\n"
+        f"💾 **Disk:** `{psutil.disk_usage('/').percent}%`\n\n🛡 **System:** `Render Docker`"
     )
-    await message.edit_text(stats)
 
-# --- VOICE NOTE WHISPERER ---
+# --- VOICE NOTE WHISPERER (.vt) ---
 @bot.on_message(filters.me & filters.command("vt", prefixes="."))
 async def transcribe_voice(client, message):
     if not message.reply_to_message or not message.reply_to_message.voice:
         return await message.edit_text("⚠️ Reply to a voice note with `.vt`")
-    
-    await message.edit_text("🎙️ Processing audio...")
+    await message.edit_text("🎙️ Processing...")
     file_path = await message.reply_to_message.download()
-    
-    await message.edit_text("⚙️ Transcribing via Deep Speech...")
     try:
         wav_path = file_path + ".wav"
-        # FFmpeg handles this perfectly in the Docker container
-        audio = AudioSegment.from_file(file_path)
-        audio.export(wav_path, format="wav")
-        
+        AudioSegment.from_file(file_path).export(wav_path, format="wav")
         r = sr.Recognizer()
         with sr.AudioFile(wav_path) as source:
-            audio_data = r.record(source)
-            text = r.recognize_google(audio_data)
-            
+            text = r.recognize_google(r.record(source))
         await message.edit_text(f"📝 **Transcription:**\n\n`{text}`")
     except Exception as e:
         await message.edit_text(f"❌ Transcription failed: {str(e)}")
     finally:
-        # Clean up files so the server doesn't bloat
         if os.path.exists(file_path): os.remove(file_path)
         if 'wav_path' in locals() and os.path.exists(wav_path): os.remove(wav_path)
 
-# --- EVERGREEN TOGGLES & AUTOMATION ---
+# --- EVERGREEN TOGGLES ---
 @bot.on_message(filters.me & filters.command("afk", prefixes="."))
 async def go_afk(client, message):
     reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently AFK. Might be slow to reply."
@@ -212,38 +290,36 @@ async def go_code(client, message):
 
 @bot.on_message(filters.private & ~filters.me, group=1)
 async def auto_reply(client, message):
-    if bot_state["focus_coding"]:
-        await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
-    elif bot_state["afk_general"]:
-        await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
+    if bot_state["focus_coding"]: await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
+    elif bot_state["afk_general"]: await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
 
 @bot.on_message(filters.me, group=2)
 async def auto_turn_off(client, message):
     text = message.text or message.caption or ""
     if (bot_state["focus_coding"] or bot_state["afk_general"]) and not text.startswith((".", "/")):
-        bot_state["focus_coding"], bot_state["afk_general"] = False, False
+        bot_state["focus_coding"] = bot_state["afk_general"] = False
         notif = await client.send_message(message.chat.id, "Welcome back! Status is now **OFF**.")
         await asyncio.sleep(3)
         await notif.delete()
 
+# --- TARGET SHORTCUTS ---
 TARGET_BOT = "@NxSFW_3Bot"
 
 @bot.on_message(filters.me & filters.command("lkm", prefixes="."))
 async def leech_movie(client, message):
     if len(message.command) > 1:
-        link = message.text.split(" ", 1)[1]
         await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {link} -ff fix")
+        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -ff fix")
     else: await message.edit_text("⚠️ Usage: `.lkm [link]`")
 
 @bot.on_message(filters.me & filters.command("lks", prefixes="."))
 async def leech_series(client, message):
     if len(message.command) > 1:
-        link = message.text.split(" ", 1)[1]
         await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {link} -e -ff fix")
+        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -e -ff fix")
     else: await message.edit_text("⚠️ Usage: `.lks [link]`")
 
+# --- UTILITIES ---
 @bot.on_message(filters.me & filters.command("scraped", prefixes="."))
 async def count_scrape(client, message):
     bot_state["stremio_scrapes"] += 1
@@ -253,7 +329,7 @@ async def count_scrape(client, message):
 async def ghost_purge(client, message):
     if not message.reply_to_message: return await message.edit_text("⚠️ Reply to a message to purge.")
     start_id = message.reply_to_message.id
-    msgs = [msg.id async for msg in client.get_chat_history(message.chat.id) if msg.id >= start_id and msg.from_user and msg.from_user.is_self]
+    msgs = [m.id async for m in client.get_chat_history(message.chat.id) if m.id >= start_id and m.from_user and m.from_user.is_self]
     if msgs: 
         await message.edit_text("🧹 Purging my messages...")
         await client.delete_messages(message.chat.id, msgs)
@@ -261,15 +337,14 @@ async def ghost_purge(client, message):
 @bot.on_message(filters.me & filters.command("ping", prefixes="."))
 async def animated_ping(client, message):
     start = time.time()
-    for frame in ["Pinging... ⬛️⬜️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬛️"]:
-        await message.edit_text(frame)
+    for f in ["Pinging... ⬛️⬜️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬛️"]:
+        await message.edit_text(f)
         await asyncio.sleep(0.1)
     await message.edit_text(f"🚀 **Userbot Online!**\n⚡️ **Latency:** `{round((time.time() - start) * 1000)}ms`\n🛡 **System:** `Render`")
 
 @bot.on_message(filters.me & filters.command("tr", prefixes="."))
 async def translate_text(client, message):
-    if not message.reply_to_message or not message.reply_to_message.text:
-        return await message.edit_text("⚠️ Reply to a text message.")
+    if not message.reply_to_message or not message.reply_to_message.text: return await message.edit_text("⚠️ Reply to a text.")
     target_lang = message.command[1] if len(message.command) > 1 else "en"
     await message.edit_text("🔄 Translating...")
     try:
@@ -291,8 +366,7 @@ async def quote_maker(client, message):
 
 @bot.on_message(filters.me & filters.command("ocr", prefixes="."))
 async def extract_text_from_image(client, message):
-    if not message.reply_to_message or not message.reply_to_message.photo:
-        return await message.edit_text("⚠️ Reply to an image with `.ocr`")
+    if not message.reply_to_message or not message.reply_to_message.photo: return await message.edit_text("⚠️ Reply to an image.")
     await message.edit_text("👁️ Scanning document...")
     file_path = await message.reply_to_message.download()
     try:
@@ -306,15 +380,13 @@ async def live_eval(client, message):
     if len(message.command) < 2: return await message.edit_text("⚠️ Provide code.")
     code = message.text.split(" ", 1)[1]
     await message.edit_text("⚙️ Executing...")
-    old_stdout = sys.stdout
-    redirected_output = sys.stdout = io.StringIO()
+    old_stdout, sys.stdout = sys.stdout, io.StringIO()
     try:
         exec(code)
-        output = redirected_output.getvalue()
+        output = sys.stdout.getvalue()
     except Exception as e: output = str(e)
     finally: sys.stdout = old_stdout
-    if not output: output = "Success (No Output)"
-    await message.edit_text(f"💻 **Input:**\n`{code}`\n\n📤 **Output:**\n`{output}`")
+    await message.edit_text(f"💻 **Input:**\n`{code}`\n\n📤 **Output:**\n`{output or 'Success (No Output)'}`")
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
