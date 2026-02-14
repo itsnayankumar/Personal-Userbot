@@ -2,3 +2,9 @@ pyrogram
 tgcrypto
 Flask
 python-dotenv
+pytesseract
+Pillow
+deep-translator
+psutil
+SpeechRecognition
+pydub
