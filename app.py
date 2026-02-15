@@ -1,4 +1,4 @@
-import os, sys, io, time, asyncio, threading, math, re, urllib.parse
+import os, sys, io, time, asyncio, threading, math, re, urllib.parse, shutil
 import pytesseract, psutil, requests
 import speech_recognition as sr
 from pydub import AudioSegment
@@ -130,20 +130,27 @@ async def auto_delete(message, delay=10):
     try: await message.delete()
     except: pass
 
-# --- HELPER: SMART PROGRESS TRACKER ---
+# --- FIXED HELPER: NON-BLOCKING PROGRESS TRACKER ---
 async def progress_tracker(current, total, message, action, start_time):
     now = time.time()
     diff = now - start_time
-    if getattr(message, "last_edit_time", 0) + 3 < now or current == total:
+    
+    # Increased edit gap to 5 seconds to heavily avoid FloodWait
+    if getattr(message, "last_edit_time", 0) + 5 < now or current == total:
         message.last_edit_time = now
+        
         percent = round(current * 100 / total, 1) if total else 0
         speed = round((current / diff) / (1024 * 1024), 2) if diff > 0 else 0
         current_mb = round(current / (1024 * 1024), 2)
         total_mb = round(total / (1024 * 1024), 2)
         bar = "█" * int(percent / 10) + "▒" * (10 - int(percent / 10))
-        try:
-            await message.edit_text(f"⏳ **{action}...**\n[{bar}] `{percent}%`\n📦 **Size:** `{current_mb} MB / {total_mb} MB`\n🚀 **Speed:** `{speed} MB/s`")
-        except: pass
+        text = f"⏳ **{action}...**\n[{bar}] `{percent}%`\n📦 **Size:** `{current_mb} MB / {total_mb} MB`\n🚀 **Speed:** `{speed} MB/s`"
+        
+        # Fire-and-forget: edits the message without blocking the download stream
+        async def safe_edit():
+            try: await message.edit_text(text)
+            except: pass
+        asyncio.create_task(safe_edit())
 
 # =================================================================
 # 🛡️ SURVEILLANCE & LOGGING
@@ -325,7 +332,6 @@ async def convert_to_gif(client, message):
         os.system(f'ffmpeg -i "{path}" -an -c:v copy "{out_path}" -y')
         
         await status.edit_text("📤 Uploading GIF...")
-        # Sending video with no_sound=True turns it into an animated GIF natively in Telegram
         await client.send_video(message.chat.id, out_path, disable_notification=True, reply_to_message_id=message.reply_to_message.id)
         await status.delete()
     except Exception as e:
@@ -355,14 +361,22 @@ async def leech_series(client, message):
         msg = await message.edit_text("⚠️ Usage: `.lks [link]`")
         asyncio.create_task(auto_delete(msg))
 
+# --- FIXED: RESTRICTED CONTENT SAVER (.dl) ---
 @bot.on_message(filters.me & filters.command("dl", prefixes="."))
 async def save_restricted(client, message):
     if not message.reply_to_message or not message.reply_to_message.media:
         msg = await message.edit_text("⚠️ Reply to restricted media with `.dl`")
         return asyncio.create_task(auto_delete(msg))
     
-    status_msg = await message.edit_text("📥 Initializing download...")
+    # Pre-wipe to ensure we have disk space
+    if os.path.exists("downloads"):
+        try: shutil.rmtree("downloads")
+        except: pass
+        
+    status_msg = await message.edit_text("📥 Initializing secure download...")
     start_time = time.time()
+    file_path = None
+    
     try:
         file_path = await message.reply_to_message.download(progress=progress_tracker, progress_args=(status_msg, "Downloading", start_time))
         if not file_path: 
@@ -381,7 +395,13 @@ async def save_restricted(client, message):
         msg = await status_msg.edit_text(f"❌ Error: {str(e)}")
         asyncio.create_task(auto_delete(msg))
     finally:
-        if 'file_path' in locals() and file_path and os.path.exists(file_path): os.remove(file_path)
+        # Aggressive post-download nuke to keep the server healthy
+        if 'file_path' in locals() and file_path and os.path.exists(file_path): 
+            try: os.remove(file_path)
+            except: pass
+        if os.path.exists("downloads"):
+            try: shutil.rmtree("downloads")
+            except: pass
 
 # =================================================================
 # 🎭 CHAT FLEX, STATUS & GHOSTING
@@ -395,18 +415,17 @@ async def self_destruct_nuke(client, message):
         
     try:
         sec = int(message.command[1])
-        if sec > 60: sec = 60 # Safety cap to prevent API flooding
+        if sec > 60: sec = 60
         text = message.text.split(" ", 2)[2]
     except:
         msg = await message.edit_text("⚠️ Invalid time format. Use: `.d 15 My message`")
         return asyncio.create_task(auto_delete(msg))
         
-    # Live ticking loop
     for i in range(sec, 0, -1):
         try:
             await message.edit_text(f"{text}\n\n⏳ `{i}s`")
             await asyncio.sleep(1)
-        except: pass # Ignore if message hasn't changed enough for Telegram's API
+        except: pass
     
     await message.delete()
 
@@ -419,21 +438,16 @@ async def ghost_action_spammer(client, message):
     action_str = message.command[1].lower()
     try: 
         sec = int(message.command[2])
-        if sec > 300: sec = 300 # Cap at 5 minutes
+        if sec > 300: sec = 300
     except: 
         msg = await message.edit_text("⚠️ Invalid seconds.")
         return asyncio.create_task(auto_delete(msg))
         
-    action_map = {
-        "typing": ChatAction.TYPING,
-        "recording": ChatAction.RECORD_AUDIO,
-        "video": ChatAction.RECORD_VIDEO
-    }
+    action_map = {"typing": ChatAction.TYPING, "recording": ChatAction.RECORD_AUDIO, "video": ChatAction.RECORD_VIDEO}
     action = action_map.get(action_str, ChatAction.TYPING)
     
-    await message.delete() # Hide the command immediately
+    await message.delete()
     
-    # Telegram requires action calls every 5 seconds to keep them active
     for _ in range(sec // 5 + 1):
         try:
             await client.send_chat_action(message.chat.id, action)
