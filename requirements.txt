@@ -8,3 +8,6 @@ deep-translator
 psutil
 SpeechRecognition
 pydub
+requests 
+aiohttp
+beautifulsoup4
