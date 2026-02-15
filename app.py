@@ -1,11 +1,12 @@
-import os, sys, io, time, asyncio, threading, math, re, urllib.parse
-import pytesseract, psutil, requests
+import os, sys, io, time, asyncio, threading, math, re, urllib.parse, gc
+import pytesseract, psutil, requests, aiohttp
 import speech_recognition as sr
+from bs4 import BeautifulSoup
 from pydub import AudioSegment
 from PIL import Image
 from deep_translator import GoogleTranslator
 from flask import Flask, render_template_string, redirect, request, session
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.enums import ChatAction
 from config import Config
 
@@ -15,6 +16,7 @@ bot_state = {
     "stremio_scrapes": 0,
     "afk_general": False,
     "focus_coding": False,
+    "focus_study": False,
     "status_message": "",
     "sniper_keywords": []
 }
@@ -29,7 +31,7 @@ web_app.secret_key = Config.FLASK_SECRET
 LOGIN_HTML = """
 <!DOCTYPE html><html><head><title>Login Access</title>
 <style>
-    body { background-color: #0d1117; color: #58a6ff; font-family: monospace; text-align: center; padding-top: 100px; }
+  body { background-color: #0d1117; color: #58a6ff; font-family: monospace; text-align: center; padding-top: 100px; }
     input { padding: 10px; border-radius: 5px; border: 1px solid #30363d; background: #161b22; color: #c9d1d9; }
     button { padding: 10px 20px; background: #238636; color: white; border: none; border-radius: 5px; cursor: pointer; }
 </style></head>
@@ -66,6 +68,13 @@ DASHBOARD_HTML = """
         <div class="stat-box"><span>Stremio Library Scrapes:</span> <span class="val">{{ state.stremio_scrapes }}</span></div>
 
         <h3>🕹️ Active Protocols</h3>
+        
+        {% if state.focus_study %}
+            <a href="/toggle/study" class="btn btn-on">📚 Study Mode: ACTIVE (Disable)</a>
+        {% else %}
+            <a href="/toggle/study" class="btn btn-off">📚 Study Mode: OFFLINE (Enable)</a>
+        {% endif %}
+        
         {% if state.focus_coding %}
             <a href="/toggle/code" class="btn btn-on">💻 Code Flow State: ACTIVE (Disable)</a>
         {% else %}
@@ -110,12 +119,16 @@ def toggle(feature):
     if not session.get('logged_in'): return redirect('/login')
     if feature == "code":
         bot_state["focus_coding"] = not bot_state["focus_coding"]
-        bot_state["afk_general"] = False
+        bot_state["afk_general"] = bot_state["focus_study"] = False
         bot_state["status_message"] = "Currently in deep coding flow. Do not disturb, will reply later."
     elif feature == "afk":
         bot_state["afk_general"] = not bot_state["afk_general"]
-        bot_state["focus_coding"] = False
+        bot_state["focus_coding"] = bot_state["focus_study"] = False
         bot_state["status_message"] = "Currently AFK. Might be slow to reply."
+    elif feature == "study":
+        bot_state["focus_study"] = not bot_state["focus_study"]
+        bot_state["focus_coding"] = bot_state["afk_general"] = False
+        bot_state["status_message"] = "Currently studying. Notifications muted, will reply later."
     return redirect('/')
 
 def run_flask():
@@ -124,13 +137,11 @@ def run_flask():
 # --- 3. TELEGRAM USERBOT ---
 bot = Client("my_userbot", session_string=Config.SESSION_STRING, api_id=Config.API_ID, api_hash=Config.API_HASH)
 
-# --- HELPER: AUTO-DELETE TASK ---
 async def auto_delete(message, delay=10):
     await asyncio.sleep(delay)
     try: await message.delete()
     except: pass
 
-# --- HELPER: SMART PROGRESS TRACKER ---
 async def progress_tracker(current, total, message, action, start_time):
     now = time.time()
     diff = now - start_time
@@ -144,6 +155,218 @@ async def progress_tracker(current, total, message, action, start_time):
         try:
             await message.edit_text(f"⏳ **{action}...**\n[{bar}] `{percent}%`\n📦 **Size:** `{current_mb} MB / {total_mb} MB`\n🚀 **Speed:** `{speed} MB/s`")
         except: pass
+
+# =================================================================
+# 🎬 4KHDHUB ZERO-DISK AUTO-SCRAPER
+# =================================================================
+HUB_SITE_URL = "https://4khdhub.dad"
+HUB_CHECK_INTERVAL = 600
+TRACKER_FILE = "last_movie.txt"
+TMDB_API_KEY = "238a4641f974e0dfce6d690634ff68ce"
+
+def get_last_sent():
+    if os.path.exists(TRACKER_FILE):
+        with open(TRACKER_FILE, "r") as f:
+            return f.read().strip()
+    return None
+
+def save_last_sent(link):
+    with open(TRACKER_FILE, "w") as f:
+        f.write(link)
+
+async def fetch_home_latest():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(HUB_SITE_URL) as response:
+                html = await response.text()
+                
+        soup = BeautifulSoup(html, "html.parser")
+        latest_card = soup.find("a", class_="movie-card")
+        
+        if not latest_card: return None
+            
+        return {
+            "link": HUB_SITE_URL + latest_card.get("href"),
+            "title": latest_card.find("h3", class_="movie-card-title").text.strip(),
+            "image": latest_card.find("img")["src"]
+        }
+    except Exception as e:
+        print(f"Home Scrape Error: {e}")
+        return None
+
+async def fetch_download_links(movie_url):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(movie_url) as response:
+                html = await response.text()
+                
+        soup = BeautifulSoup(html, "html.parser")
+        
+        filename_tag = soup.find(class_=lambda c: c and ('file-title' in c or 'filename' in c))
+        filename = filename_tag.text.strip() if filename_tag else "Unknown.Filename.mkv"
+        
+        hubcloud_tag = soup.find(lambda tag: tag.name == "a" and "HubCloud" in tag.text)
+        hubdrive_tag = soup.find(lambda tag: tag.name == "a" and "HubDrive" in tag.text)
+        
+        size_match = re.search(r'(\d+(?:\.\d+)?\s*(?:GB|MB))', soup.get_text())
+        file_size = size_match.group(1) if size_match else "Unknown Size"
+        
+        del html
+        del soup
+        
+        return {
+            "filename": filename,
+            "size": file_size,
+            "hubcloud": hubcloud_tag.get("href") if hubcloud_tag else None,
+            "hubdrive": hubdrive_tag.get("href") if hubdrive_tag else None
+        }
+    except Exception as e:
+        print(f"Inner Page Scrape Error: {e}")
+        return None
+
+async def hub_monitor(client: Client):
+    await asyncio.sleep(10)
+    print("🍿 4KHDHub Auto-Poster Started!")
+    
+    while True:
+        try:
+            latest = await fetch_home_latest()
+            if latest:
+                last_sent = get_last_sent()
+                if latest["link"] != last_sent:
+                    details = await fetch_download_links(latest["link"])
+                    
+                    if details:
+                        caption = (
+                            f"🎬 **{latest['title']}**\n\n"
+                            f"📦 **Size:** `{details['size']}`\n"
+                            f"📄 **File:** `{details['filename']}`\n\n"
+                        )
+                        if details['hubcloud']: caption += f"☁️ **HubCloud:** [Download Here]({details['hubcloud']})\n"
+                        if details['hubdrive']: caption += f"🚀 **HubDrive:** [Download Here]({details['hubdrive']})\n"
+                        caption += f"\n🌐 **Source:** [4KHDHub]({latest['link']})"
+                        
+                        await client.send_photo(Config.LOG_CHANNEL_ID, photo=latest["image"], caption=caption)
+                        save_last_sent(latest["link"])
+            gc.collect()
+        except Exception as e:
+            print(f"Monitor Loop Error: {e}")
+        await asyncio.sleep(HUB_CHECK_INTERVAL)
+
+# =================================================================
+# 🔍 SEARCH, TMDB & SCRAPING TOOLS
+# =================================================================
+
+@bot.on_message(filters.me & filters.command("dll", prefixes="."))
+async def search_and_scrape(client, message):
+    if len(message.command) < 2:
+        msg = await message.edit_text("⚠️ Usage: `.dll [movie/show name]`")
+        return asyncio.create_task(auto_delete(msg))
+        
+    query = message.text.split(" ", 1)[1]
+    status_msg = await message.edit_text(f"🔍 Searching for `{query}` on 4KHDHub...")
+    search_url = f"{HUB_SITE_URL}/?s={urllib.parse.quote(query)}"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url) as response:
+                html = await response.text()
+                
+        soup = BeautifulSoup(html, "html.parser")
+        results = soup.find_all("a", class_="movie-card")
+        
+        if not results:
+            msg = await status_msg.edit_text(f"❌ No results found for `{query}`.")
+            return asyncio.create_task(auto_delete(msg))
+            
+        max_results = min(len(results), 10)
+        await status_msg.edit_text(f"✅ Found {len(results)} results! Fetching links for the top {max_results}...\n\n(Sending 1/sec to avoid limits 🛡️)")
+        
+        for card in results[:max_results]:
+            title = card.find("h3", class_="movie-card-title").text.strip()
+            link = HUB_SITE_URL + card.get("href")
+            details = await fetch_download_links(link)
+            
+            if details:
+                caption = (
+                    f"🎬 **{title}**\n\n"
+                    f"📦 **Size:** `{details['size']}`\n"
+                    f"📄 **File:** `{details['filename']}`\n\n"
+                )
+                if details['hubcloud']: caption += f"☁️ **HubCloud:** [Download Here]({details['hubcloud']})\n"
+                if details['hubdrive']: caption += f"🚀 **HubDrive:** [Download Here]({details['hubdrive']})\n"
+                caption += f"\n🌐 **Source:** [4KHDHub]({link})"
+                
+                img_tag = card.find("img")
+                img_url = img_tag["src"] if img_tag else None
+                
+                if img_url: await client.send_photo(message.chat.id, photo=img_url, caption=caption)
+                else: await client.send_message(message.chat.id, caption, disable_web_page_preview=True)
+                    
+            await asyncio.sleep(1.5) 
+            
+        await status_msg.delete() 
+        gc.collect()
+    except Exception as e:
+        msg = await status_msg.edit_text(f"❌ Search Error: {str(e)}")
+        asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("order", prefixes="."))
+async def fetch_watch_order(client, message):
+    if len(message.command) < 2:
+        msg = await message.edit_text("⚠️ Usage: `.order [franchise name]`")
+        return asyncio.create_task(auto_delete(msg))
+        
+    query = message.text.split(" ", 1)[1]
+    await message.edit_text(f"🔍 Accessing TMDB for `{query}` timeline...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            search_url = f"https://api.themoviedb.org/3/search/collection?api_key={TMDB_API_KEY}&query={urllib.parse.quote(query)}"
+            async with session.get(search_url) as resp:
+                data = await resp.json()
+                
+            if not data.get("results"):
+                msg = await message.edit_text(f"❌ No franchise collection found for `{query}`.")
+                return asyncio.create_task(auto_delete(msg))
+                
+            collection_id = data["results"][0]["id"]
+            collection_name = data["results"][0]["name"]
+            
+            details_url = f"https://api.themoviedb.org/3/collection/{collection_id}?api_key={TMDB_API_KEY}"
+            async with session.get(details_url) as resp:
+                details = await resp.json()
+            
+            parts = details.get("parts", [])
+            parts = sorted([p for p in parts if p.get("release_date")], key=lambda x: x["release_date"])
+            
+            text = f"🍿 **{collection_name} - Watch Order:**\n\n"
+            for i, part in enumerate(parts, 1):
+                year = part['release_date'][:4]
+                text += f"**{i}.** {part['title']} ({year})\n"
+            
+            await message.edit_text(text)
+    except Exception as e:
+        msg = await message.edit_text(f"❌ TMDB Fetch Error: {str(e)}")
+        asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("rn", prefixes="."))
+async def smart_renamer(client, message):
+    if len(message.command) < 2:
+        msg = await message.edit_text("⚠️ Usage: `.rn [messy_filename]`")
+        return asyncio.create_task(auto_delete(msg))
+        
+    raw_name = message.text.split(" ", 1)[1]
+    if "Jimmy.Fallon" in raw_name:
+        match = re.search(r'Jimmy\.Fallon\.\d{4}\.\d{2}\.\d{2}\.(.*?)\.\d{3,4}p', raw_name)
+        guest = match.group(1).replace(".", " ") if match else "Guest"
+        clean_name = f"The.Tonight.Show.Starring.Jimmy.Fallon.S13E36.{guest.replace(' ', '.')}.1080p.WEB-DL.DUAL.DDP5.1.Atmos.H.264-Nkt.mkv"
+    else:
+        clean_name = raw_name.replace(" ", ".").replace("%20", ".")
+        clean_name = re.sub(r'[^A-Za-z0-9\-\.]', '', clean_name)
+        clean_name = re.sub(r'\.{2,}', '.', clean_name)
+        
+    await message.edit_text(f"✨ **Clean Release Name:**\n\n`{clean_name}`")
 
 # =================================================================
 # 🛡️ SURVEILLANCE & LOGGING
@@ -215,145 +438,8 @@ async def log_deleted(client, messages):
                 await asyncio.sleep(1.5)
 
 # =================================================================
-# ⚙️ SYSTEM, UTILITIES & AI
+# ⚙️ SYSTEM & UTILITIES 
 # =================================================================
-
-@bot.on_message(filters.me & filters.command("info", prefixes="."))
-async def deep_inspector(client, message):
-    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
-    if not target: 
-        msg = await message.edit_text("⚠️ Cannot fetch info.")
-        return asyncio.create_task(auto_delete(msg))
-    dc_id = target.dc_id or "Unknown"
-    status = "Restricted" if target.is_restricted else "Clean"
-    bot_status = "Yes" if target.is_bot else "No"
-    
-    text = (
-        f"🕵️ **Deep Look Inspector**\n\n"
-        f"👤 **Name:** {target.first_name}\n"
-        f"🆔 **Permanent ID:** `{target.id}`\n"
-        f"🌐 **Data Center:** `DC {dc_id}`\n"
-        f"🤖 **Is Bot:** `{bot_status}`\n"
-        f"🛡️ **Status:** `{status}`\n"
-        f"🔗 **Profile:** [Link](tg://user?id={target.id})"
-    )
-    msg = await message.edit_text(text)
-    asyncio.create_task(auto_delete(msg, 20))
-
-@bot.on_message(filters.me & filters.command("clean", prefixes="."))
-async def clean_url(client, message):
-    if len(message.command) < 2 and not message.reply_to_message:
-        msg = await message.edit_text("⚠️ Provide a messy link or reply to one.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    text = message.text.split(" ", 1)[1] if len(message.command) > 1 else message.reply_to_message.text
-    urls = re.findall(r'(https?://[^\s]+)', text)
-    if not urls:
-        msg = await message.edit_text("⚠️ No URLs found.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    url = urls[0]
-    await message.edit_text("🔗 Unshortening and stripping trackers...")
-    try:
-        res = requests.get(url, allow_redirects=True, timeout=10)
-        parsed = urllib.parse.urlparse(res.url)
-        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        msg = await message.edit_text(f"✅ **Clean Link:**\n`{clean}`")
-    except Exception as e:
-        msg = await message.edit_text(f"❌ Failed: {str(e)}")
-    asyncio.create_task(auto_delete(msg, 15))
-
-@bot.on_message(filters.me & filters.command("sys", prefixes="."))
-async def system_health(client, message):
-    msg = await message.edit_text(f"🖥 **Server Health Matrix**\n\n🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n💽 **RAM:** `{psutil.virtual_memory().percent}%`\n💾 **Disk:** `{psutil.disk_usage('/').percent}%`\n\n🛡 **System:** `Render Docker`")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("eval", prefixes="."))
-async def live_eval(client, message):
-    if len(message.command) < 2: 
-        msg = await message.edit_text("⚠️ Provide code.")
-        return asyncio.create_task(auto_delete(msg))
-    code = message.text.split(" ", 1)[1]
-    await message.edit_text("⚙️ Executing...")
-    old_stdout, sys.stdout = sys.stdout, io.StringIO()
-    try:
-        exec(code)
-        output = sys.stdout.getvalue()
-    except Exception as e: output = str(e)
-    finally: sys.stdout = old_stdout
-    msg = await message.edit_text(f"💻 **Input:**\n`{code}`\n\n📤 **Output:**\n`{output or 'Success (No Output)'}`")
-    asyncio.create_task(auto_delete(msg))
-
-# =================================================================
-# 🎬 MEDIA, FORMAT SHIFTING & LEECHING
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("mp3", prefixes="."))
-async def convert_to_mp3(client, message):
-    if not message.reply_to_message or not message.reply_to_message.media:
-        msg = await message.edit_text("⚠️ Reply to a video or audio file.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    status = await message.edit_text("📥 Downloading media...")
-    try:
-        path = await message.reply_to_message.download()
-        out_path = path + ".mp3"
-        await status.edit_text("⚙️ Ripping raw audio track via FFmpeg...")
-        os.system(f'ffmpeg -i "{path}" -q:a 0 -map a "{out_path}" -y')
-        
-        await status.edit_text("📤 Uploading MP3...")
-        await client.send_audio(message.chat.id, out_path, reply_to_message_id=message.reply_to_message.id)
-        await status.delete()
-    except Exception as e:
-        msg = await status.edit_text(f"❌ Error: {str(e)}")
-        asyncio.create_task(auto_delete(msg))
-    finally:
-        if 'path' in locals() and os.path.exists(path): os.remove(path)
-        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
-
-@bot.on_message(filters.me & filters.command("gif", prefixes="."))
-async def convert_to_gif(client, message):
-    if not message.reply_to_message or not message.reply_to_message.video:
-        msg = await message.edit_text("⚠️ Reply to a video file.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    status = await message.edit_text("📥 Downloading video...")
-    try:
-        path = await message.reply_to_message.download()
-        out_path = path + "_mute.mp4"
-        await status.edit_text("⚙️ Stripping audio for Telegram GIF...")
-        os.system(f'ffmpeg -i "{path}" -an -c:v copy "{out_path}" -y')
-        
-        await status.edit_text("📤 Uploading GIF...")
-        # Sending video with no_sound=True turns it into an animated GIF natively in Telegram
-        await client.send_video(message.chat.id, out_path, disable_notification=True, reply_to_message_id=message.reply_to_message.id)
-        await status.delete()
-    except Exception as e:
-        msg = await status.edit_text(f"❌ Error: {str(e)}")
-        asyncio.create_task(auto_delete(msg))
-    finally:
-        if 'path' in locals() and os.path.exists(path): os.remove(path)
-        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
-
-TARGET_BOT = "@NxSFW_3Bot"
-
-@bot.on_message(filters.me & filters.command("lkm", prefixes="."))
-async def leech_movie(client, message):
-    if len(message.command) > 1:
-        await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -ff fix")
-    else: 
-        msg = await message.edit_text("⚠️ Usage: `.lkm [link]`")
-        asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("lks", prefixes="."))
-async def leech_series(client, message):
-    if len(message.command) > 1:
-        await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -e -ff fix")
-    else: 
-        msg = await message.edit_text("⚠️ Usage: `.lks [link]`")
-        asyncio.create_task(auto_delete(msg))
 
 @bot.on_message(filters.me & filters.command("dl", prefixes="."))
 async def save_restricted(client, message):
@@ -383,121 +469,6 @@ async def save_restricted(client, message):
     finally:
         if 'file_path' in locals() and file_path and os.path.exists(file_path): os.remove(file_path)
 
-# =================================================================
-# 🎭 CHAT FLEX, STATUS & GHOSTING
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("d", prefixes="."))
-async def self_destruct_nuke(client, message):
-    if len(message.command) < 3:
-        msg = await message.edit_text("⚠️ Usage: `.d [seconds] [message]`")
-        return asyncio.create_task(auto_delete(msg))
-        
-    try:
-        sec = int(message.command[1])
-        if sec > 60: sec = 60 # Safety cap to prevent API flooding
-        text = message.text.split(" ", 2)[2]
-    except:
-        msg = await message.edit_text("⚠️ Invalid time format. Use: `.d 15 My message`")
-        return asyncio.create_task(auto_delete(msg))
-        
-    # Live ticking loop
-    for i in range(sec, 0, -1):
-        try:
-            await message.edit_text(f"{text}\n\n⏳ `{i}s`")
-            await asyncio.sleep(1)
-        except: pass # Ignore if message hasn't changed enough for Telegram's API
-    
-    await message.delete()
-
-@bot.on_message(filters.me & filters.command("ghost", prefixes="."))
-async def ghost_action_spammer(client, message):
-    if len(message.command) < 3:
-        msg = await message.edit_text("⚠️ Usage: `.ghost [typing/recording/video] [seconds]`")
-        return asyncio.create_task(auto_delete(msg))
-        
-    action_str = message.command[1].lower()
-    try: 
-        sec = int(message.command[2])
-        if sec > 300: sec = 300 # Cap at 5 minutes
-    except: 
-        msg = await message.edit_text("⚠️ Invalid seconds.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    action_map = {
-        "typing": ChatAction.TYPING,
-        "recording": ChatAction.RECORD_AUDIO,
-        "video": ChatAction.RECORD_VIDEO
-    }
-    action = action_map.get(action_str, ChatAction.TYPING)
-    
-    await message.delete() # Hide the command immediately
-    
-    # Telegram requires action calls every 5 seconds to keep them active
-    for _ in range(sec // 5 + 1):
-        try:
-            await client.send_chat_action(message.chat.id, action)
-            await asyncio.sleep(min(5, sec))
-            sec -= 5
-            if sec <= 0: break
-        except: break
-
-@bot.on_message(filters.me & filters.command("afk", prefixes="."))
-async def go_afk(client, message):
-    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently AFK. Might be slow to reply."
-    bot_state["afk_general"], bot_state["focus_coding"], bot_state["status_message"] = True, False, reason
-    msg = await message.edit_text(f"🚶 **AFK Mode ON:** {reason}")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("code", prefixes="."))
-async def go_code(client, message):
-    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently in deep coding flow. Do not disturb."
-    bot_state["focus_coding"], bot_state["afk_general"], bot_state["status_message"] = True, False, reason
-    msg = await message.edit_text(f"💻 **Code Flow Mode ON:** {reason}")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.private & ~filters.me, group=1)
-async def auto_reply(client, message):
-    if bot_state["focus_coding"]: await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
-    elif bot_state["afk_general"]: await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
-
-@bot.on_message(filters.me, group=2)
-async def auto_turn_off(client, message):
-    text = message.text or message.caption or ""
-    if (bot_state["focus_coding"] or bot_state["afk_general"]) and not text.startswith((".", "/")):
-        bot_state["focus_coding"] = bot_state["afk_general"] = False
-        notif = await client.send_message(message.chat.id, "Welcome back! Status is now **OFF**.")
-        asyncio.create_task(auto_delete(notif, 3))
-
-# =================================================================
-# 🧹 PURGE & TOOLS
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("purge", prefixes="."))
-async def ghost_purge(client, message):
-    if not message.reply_to_message: 
-        msg = await message.edit_text("⚠️ Reply to a message to purge.")
-        return asyncio.create_task(auto_delete(msg))
-    
-    start_id = message.reply_to_message.id
-    await message.edit_text("🧹 Scanning chat history...")
-    msgs_to_delete = []
-    
-    async for m in client.get_chat_history(message.chat.id):
-        if m.id < start_id: break
-        if m.from_user and m.from_user.is_self: msgs_to_delete.append(m.id)
-            
-    if not msgs_to_delete: 
-        msg = await message.edit_text("⚠️ No messages found to delete.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    for i in range(0, len(msgs_to_delete), 100):
-        batch = msgs_to_delete[i:i+100]
-        try:
-            await client.delete_messages(message.chat.id, batch)
-            await asyncio.sleep(0.5)
-        except: pass
-
 @bot.on_message(filters.me & filters.command("ping", prefixes="."))
 async def animated_ping(client, message):
     start = time.time()
@@ -509,76 +480,80 @@ async def animated_ping(client, message):
     msg = await message.edit_text(f"🚀 **Userbot Online!**\n⚡️ **Latency:** `{round((time.time() - start) * 1000)}ms`\n🛡 **System:** `Render`")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_message(filters.me & filters.command("scraped", prefixes="."))
-async def count_scrape(client, message):
-    bot_state["stremio_scrapes"] += 1
-    msg = await message.edit_text(f"✅ Library updated. Scrapes: {bot_state['stremio_scrapes']}")
+@bot.on_message(filters.me & filters.command("sys", prefixes="."))
+async def system_health(client, message):
+    msg = await message.edit_text(f"🖥 **Server Health Matrix**\n\n🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n💽 **RAM:** `{psutil.virtual_memory().percent}%`\n💾 **Disk:** `{psutil.disk_usage('/').percent}%`")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_message(filters.me & filters.command("tr", prefixes="."))
-async def translate_text(client, message):
-    if not message.reply_to_message or not message.reply_to_message.text: 
-        msg = await message.edit_text("⚠️ Reply to a text.")
+# =================================================================
+# 🎭 CHAT FLEX & AFK MODES
+# =================================================================
+
+@bot.on_message(filters.me & filters.command("d", prefixes="."))
+async def self_destruct_nuke(client, message):
+    if len(message.command) < 3:
+        msg = await message.edit_text("⚠️ Usage: `.d [seconds] [message]`")
         return asyncio.create_task(auto_delete(msg))
-    target_lang = message.command[1] if len(message.command) > 1 else "en"
-    await message.edit_text("🔄 Translating...")
     try:
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(message.reply_to_message.text)
-        msg = await message.edit_text(f"🌍 **Translation ({target_lang}):**\n`{translated}`")
-    except Exception as e: 
-        msg = await message.edit_text(f"❌ Error: {e}")
+        sec = min(int(message.command[1]), 60)
+        text = message.text.split(" ", 2)[2]
+    except:
+        msg = await message.edit_text("⚠️ Invalid time format. Use: `.d 15 My message`")
+        return asyncio.create_task(auto_delete(msg))
+        
+    for i in range(sec, 0, -1):
+        try:
+            await message.edit_text(f"{text}\n\n⏳ `{i}s`")
+            await asyncio.sleep(1)
+        except: pass
+    await message.delete()
+
+@bot.on_message(filters.me & filters.command("afk", prefixes="."))
+async def go_afk(client, message):
+    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently AFK. Might be slow to reply."
+    bot_state["afk_general"], bot_state["focus_coding"], bot_state["focus_study"], bot_state["status_message"] = True, False, False, reason
+    msg = await message.edit_text(f"🚶 **AFK Mode ON:** {reason}")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_message(filters.me & filters.command("q", prefixes="."))
-async def quote_maker(client, message):
-    if not message.reply_to_message: 
-        msg = await message.edit_text("⚠️ Reply to a message.")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("🎨 Generating sticker...")
-    await message.reply_to_message.forward("@QuotLyBot")
-    await asyncio.sleep(3)
-    async for sticker in client.get_chat_history("@QuotLyBot", limit=1):
-        if sticker.sticker:
-            await client.send_sticker(message.chat.id, sticker.sticker.file_id)
-            await message.delete()
-            break
-
-@bot.on_message(filters.me & filters.command("ocr", prefixes="."))
-async def extract_text_from_image(client, message):
-    if not message.reply_to_message or not message.reply_to_message.photo: 
-        msg = await message.edit_text("⚠️ Reply to an image.")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("👁️ Scanning document...")
-    file_path = await message.reply_to_message.download()
-    try:
-        extracted = pytesseract.image_to_string(Image.open(file_path))
-        if not extracted.strip(): msg = await message.edit_text("❌ No text found.")
-        else: msg = await message.edit_text(f"📝 **Extracted:**\n\n`{extracted}`")
-    finally: os.remove(file_path)
+@bot.on_message(filters.me & filters.command("code", prefixes="."))
+async def go_code(client, message):
+    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently in deep coding flow. Do not disturb."
+    bot_state["focus_coding"], bot_state["afk_general"], bot_state["focus_study"], bot_state["status_message"] = True, False, False, reason
+    msg = await message.edit_text(f"💻 **Code Flow Mode ON:** {reason}")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_message(filters.me & filters.command("vt", prefixes="."))
-async def transcribe_voice(client, message):
-    if not message.reply_to_message or not message.reply_to_message.voice:
-        msg = await message.edit_text("⚠️ Reply to a voice note with `.vt`")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("🎙️ Processing...")
-    file_path = await message.reply_to_message.download()
-    try:
-        wav_path = file_path + ".wav"
-        AudioSegment.from_file(file_path).export(wav_path, format="wav")
-        r = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            text = r.recognize_google(r.record(source))
-        msg = await message.edit_text(f"📝 **Transcription:**\n\n`{text}`")
-    except Exception as e:
-        msg = await message.edit_text(f"❌ Transcription failed: {str(e)}")
-    finally:
-        if os.path.exists(file_path): os.remove(file_path)
-        if 'wav_path' in locals() and os.path.exists(wav_path): os.remove(wav_path)
+@bot.on_message(filters.me & filters.command("study", prefixes="."))
+async def go_study(client, message):
+    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently studying. Notifications muted."
+    bot_state["focus_study"], bot_state["afk_general"], bot_state["focus_coding"], bot_state["status_message"] = True, False, False, reason
+    msg = await message.edit_text(f"📚 **Study Mode ON:** {reason}")
     asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.private & ~filters.me, group=1)
+async def auto_reply(client, message):
+    if bot_state["focus_coding"]: await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
+    elif bot_state["focus_study"]: await message.reply_text(f"📚 **Auto-Reply:**\n{bot_state['status_message']}")
+    elif bot_state["afk_general"]: await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
+
+@bot.on_message(filters.me, group=2)
+async def auto_turn_off(client, message):
+    text = message.text or message.caption or ""
+    if (bot_state["focus_coding"] or bot_state["afk_general"] or bot_state["focus_study"]) and not text.startswith((".", "/")):
+        bot_state["focus_coding"] = bot_state["afk_general"] = bot_state["focus_study"] = False
+        notif = await client.send_message(message.chat.id, "Welcome back! Status is now **OFF**.")
+        asyncio.create_task(auto_delete(notif, 3))
+
+# =================================================================
+# 🚀 LAUNCH SEQUENCE
+# =================================================================
+
+async def start_services():
+    await bot.start()
+    asyncio.create_task(hub_monitor(bot))
+    await idle()
+    await bot.stop()
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     print("🔒 Pro Max Server Engine Online!")
-    bot.run()
+    bot.run(start_services())
