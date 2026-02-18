@@ -1,4 +1,4 @@
-import os, sys, io, time, asyncio, threading, math, re, urllib.parse, shutil
+import os, sys, io, time, asyncio, threading, math, re, urllib.parse, shutil, json
 import pytesseract, psutil, requests
 import speech_recognition as sr
 from pydub import AudioSegment
@@ -16,7 +16,8 @@ bot_state = {
     "afk_general": False,
     "focus_coding": False,
     "status_message": "",
-    "sniper_keywords": []
+    "sniper_keywords": [],
+    "original_profile": {}
 }
 
 message_cache = {}
@@ -60,24 +61,12 @@ DASHBOARD_HTML = """
 <body>
     <div class="container">
         <h1>⚡ Pro Max Command Center</h1>
-        
-        <h3>📊 System Status</h3>
         <div class="stat-box"><span>Server Uptime:</span> <span class="val">{{ uptime }} hrs</span></div>
         <div class="stat-box"><span>Stremio Library Scrapes:</span> <span class="val">{{ state.stremio_scrapes }}</span></div>
-
-        <h3>🕹️ Active Protocols</h3>
-        {% if state.focus_coding %}
-            <a href="/toggle/code" class="btn btn-on">💻 Code Flow State: ACTIVE (Disable)</a>
-        {% else %}
-            <a href="/toggle/code" class="btn btn-off">💻 Code Flow State: OFFLINE (Enable)</a>
-        {% endif %}
-
-        {% if state.afk_general %}
-            <a href="/toggle/afk" class="btn btn-on">🚶 General AFK: ACTIVE (Disable)</a>
-        {% else %}
-            <a href="/toggle/afk" class="btn btn-off">🚶 General AFK: OFFLINE (Enable)</a>
-        {% endif %}
-        
+        {% if state.focus_coding %}<a href="/toggle/code" class="btn btn-on">💻 Code Flow: ACTIVE (Disable)</a>
+        {% else %}<a href="/toggle/code" class="btn btn-off">💻 Code Flow: OFFLINE (Enable)</a>{% endif %}
+        {% if state.afk_general %}<a href="/toggle/afk" class="btn btn-on">🚶 AFK: ACTIVE (Disable)</a>
+        {% else %}<a href="/toggle/afk" class="btn btn-off">🚶 AFK: OFFLINE (Enable)</a>{% endif %}
         <a href="/logout" class="btn logout">🚪 Secure Logout</a>
     </div>
 </body></html>
@@ -90,8 +79,7 @@ def login():
         if request.form['password'] == Config.DASH_PASSWORD:
             session['logged_in'] = True
             return redirect('/')
-        else:
-            error = "Intruder Alert. Incorrect Password."
+        else: error = "Intruder Alert. Incorrect Password."
     return render_template_string(LOGIN_HTML, error=error)
 
 @web_app.route('/logout')
@@ -111,7 +99,7 @@ def toggle(feature):
     if feature == "code":
         bot_state["focus_coding"] = not bot_state["focus_coding"]
         bot_state["afk_general"] = False
-        bot_state["status_message"] = "Currently in deep coding flow. Do not disturb, will reply later."
+        bot_state["status_message"] = "Currently in deep coding flow. Do not disturb."
     elif feature == "afk":
         bot_state["afk_general"] = not bot_state["afk_general"]
         bot_state["focus_coding"] = False
@@ -121,40 +109,174 @@ def toggle(feature):
 def run_flask():
     web_app.run(host="0.0.0.0", port=Config.PORT)
 
-# --- 3. TELEGRAM USERBOT ---
 bot = Client("my_userbot", session_string=Config.SESSION_STRING, api_id=Config.API_ID, api_hash=Config.API_HASH)
 
-# --- HELPER: AUTO-DELETE TASK ---
 async def auto_delete(message, delay=10):
     await asyncio.sleep(delay)
     try: await message.delete()
     except: pass
 
-# --- FIXED HELPER: NON-BLOCKING PROGRESS TRACKER ---
 async def progress_tracker(current, total, message, action, start_time):
     now = time.time()
     diff = now - start_time
-    
-    # Increased edit gap to 5 seconds to heavily avoid FloodWait
     if getattr(message, "last_edit_time", 0) + 5 < now or current == total:
         message.last_edit_time = now
-        
         percent = round(current * 100 / total, 1) if total else 0
         speed = round((current / diff) / (1024 * 1024), 2) if diff > 0 else 0
         current_mb = round(current / (1024 * 1024), 2)
         total_mb = round(total / (1024 * 1024), 2)
         bar = "█" * int(percent / 10) + "▒" * (10 - int(percent / 10))
-        text = f"⏳ **{action}...**\n[{bar}] `{percent}%`\n📦 **Size:** `{current_mb} MB / {total_mb} MB`\n🚀 **Speed:** `{speed} MB/s`"
-        
-        # Fire-and-forget: edits the message without blocking the download stream
+        text = f"⏳ **{action}...**\n[{bar}] `{percent}%`\n📦 **Size:** `{current_mb} / {total_mb} MB`\n🚀 **Speed:** `{speed} MB/s`"
         async def safe_edit():
             try: await message.edit_text(text)
             except: pass
         asyncio.create_task(safe_edit())
 
 # =================================================================
-# 🛡️ SURVEILLANCE & LOGGING
+# 🥷 VOLUME 2: IDENTITY THEFT & FORGERY
 # =================================================================
+
+@bot.on_message(filters.me & filters.command("steal", prefixes="."))
+async def steal_identity(client, message):
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        msg = await message.edit_text("⚠️ Reply to a user to steal their identity.")
+        return asyncio.create_task(auto_delete(msg))
+        
+    msg = await message.edit_text("🥷 Acquiring target identity...")
+    target = message.reply_to_message.from_user
+    
+    # Backup original identity
+    me = await client.get_me()
+    bot_state["original_profile"] = {
+        "first_name": me.first_name,
+        "last_name": me.last_name or "",
+        "bio": (await client.get_chat(me.id)).bio or ""
+    }
+    
+    # Apply stolen text data
+    await client.update_profile(first_name=target.first_name, last_name=target.last_name or "", bio="Identity temporarily acquired.")
+    
+    # Steal profile picture
+    try:
+        async for photo in client.get_chat_photos(target.id, limit=1):
+            pfp_path = await client.download_media(photo.file_id)
+            await client.set_profile_photo(photo=pfp_path)
+            os.remove(pfp_path)
+            break
+    except: pass
+    
+    await msg.edit_text(f"🎭 **Identity Stolen:** `{target.first_name}`")
+    asyncio.create_task(auto_delete(msg, 5))
+
+@bot.on_message(filters.me & filters.command("revert", prefixes="."))
+async def revert_identity(client, message):
+    msg = await message.edit_text("🔄 Restoring original identity...")
+    if "original_profile" in bot_state and bot_state["original_profile"]:
+        p = bot_state["original_profile"]
+        await client.update_profile(first_name=p["first_name"], last_name=p["last_name"], bio=p["bio"])
+    
+    # Delete the current (stolen) photo to reveal your real one underneath
+    try:
+        async for photo in client.get_chat_photos("me", limit=1):
+            await client.delete_profile_photos(photo.file_id)
+            break
+    except: pass
+    
+    await msg.edit_text("✅ Identity restored successfully.")
+    asyncio.create_task(auto_delete(msg, 5))
+
+@bot.on_message(filters.me & filters.command("fq", prefixes="."))
+async def forged_quote(client, message):
+    if not message.reply_to_message or len(message.command) < 2:
+        msg = await message.edit_text("⚠️ Reply to a user with `.fq [fake text]`")
+        return asyncio.create_task(auto_delete(msg))
+        
+    target = message.reply_to_message.from_user
+    fake_text = message.text.split(" ", 1)[1]
+    name = target.first_name if target else "Unknown User"
+    
+    # Generates a convincing fake forward block
+    await message.edit_text(f"👤 **{name}**\n💬 `{fake_text}`\n\n*(Sent via {name}'s device)*")
+
+@bot.on_message(filters.me & filters.command("mock", prefixes="."))
+async def mock_spongebob(client, message):
+    if not message.reply_to_message or not message.reply_to_message.text:
+        msg = await message.edit_text("⚠️ Reply to a text message.")
+        return asyncio.create_task(auto_delete(msg))
+        
+    text = message.reply_to_message.text
+    mocked = "".join([c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(text)])
+    await message.edit_text(f"{mocked} 🤡")
+
+# =================================================================
+# 🗄️ VOLUME 2: BACKUPS & TELEGRAPH
+# =================================================================
+
+@bot.on_message(filters.me & filters.command("backup", prefixes="."))
+async def stealth_backup(client, message):
+    limit = int(message.command[1]) if len(message.command) > 1 else 100
+    msg = await message.edit_text(f"📥 Silently backing up the last {limit} messages...")
+    
+    text_data = f"Backup of {message.chat.title or message.chat.id}\n{'='*40}\n\n"
+    
+    async for m in client.get_chat_history(message.chat.id, limit=limit):
+        sender = m.from_user.first_name if m.from_user else "Unknown"
+        time_str = m.date.strftime('%Y-%m-%d %H:%M:%S') if m.date else "Unknown Time"
+        content = m.text or m.caption or f"[Media File: {m.media}]"
+        text_data = f"[{time_str}] {sender}: {content}\n" + text_data
+        
+    file_name = f"backup_{message.chat.id}.txt"
+    with open(file_name, "w", encoding="utf-8") as f:
+        f.write(text_data)
+        
+    await client.send_document(
+        Config.LOG_CHANNEL_ID, 
+        file_name, 
+        caption=f"🗄️ **Stealth Backup Complete**\n🏢 Chat: `{message.chat.title or 'Private'}`\n📜 Messages: `{limit}`"
+    )
+    os.remove(file_name)
+    await msg.edit_text("✅ Backup safely delivered to Log Channel.")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("tg", prefixes="."))
+async def telegraph_publish(client, message):
+    if not message.reply_to_message or not message.reply_to_message.text:
+        msg = await message.edit_text("⚠️ Reply to a massive text block.")
+        return asyncio.create_task(auto_delete(msg))
+        
+    msg = await message.edit_text("🌐 Compiling to Telegraph...")
+    try:
+        # Create anonymous account on the fly
+        r = requests.get('https://api.telegra.ph/createAccount?short_name=ProMax&author_name=ServerAdmin')
+        token = r.json()['result']['access_token']
+        
+        # Publish page
+        content = [{"tag":"p", "children":[message.reply_to_message.text.replace("\n", "<br>")]}]
+        post = requests.post(f'https://api.telegra.ph/createPage?access_token={token}&title=Terminal+Dump&return_content=false', json={'content': content})
+        url = post.json()['result']['url']
+        
+        await msg.edit_text(f"✅ **Text Published!**\n🔗 [Read Full Document]({url})", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ Failed to publish: {str(e)}")
+        asyncio.create_task(auto_delete(msg, 10))
+
+# =================================================================
+# 🛡️ VOLUME 1: CORE SURVEILLANCE & LOGGING
+# =================================================================
+
+@bot.on_message(filters.me & filters.command("info", prefixes="."))
+async def deep_inspector(client, message):
+    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
+    if not target: 
+        msg = await message.edit_text("⚠️ Cannot fetch info.")
+        return asyncio.create_task(auto_delete(msg))
+    dc_id = target.dc_id or "Unknown"
+    status = "Restricted" if target.is_restricted else "Clean"
+    bot_status = "Yes" if target.is_bot else "No"
+    
+    text = f"🕵️ **Deep Look Inspector**\n\n👤 **Name:** {target.first_name}\n🆔 **Permanent ID:** `{target.id}`\n🌐 **Data Center:** `DC {dc_id}`\n🤖 **Is Bot:** `{bot_status}`\n🛡️ **Status:** `{status}`\n🔗 **Profile:** [Link](tg://user?id={target.id})"
+    msg = await message.edit_text(text)
+    asyncio.create_task(auto_delete(msg, 20))
 
 @bot.on_message(filters.private & ~filters.me & (filters.photo | filters.video | filters.animation), group=3)
 async def auto_view_once(client, message):
@@ -168,7 +290,7 @@ async def auto_view_once(client, message):
             caption = f"🚨 **AUTO-INTERCEPT: View-Once Media**\n👤 **From:** {user_tag}\n⏳ **Timer:** `{media.ttl_seconds}s`"
             if message.photo: await client.send_photo(Config.LOG_CHANNEL_ID, file_path, caption=caption)
             else: await client.send_video(Config.LOG_CHANNEL_ID, file_path, caption=caption)
-        except Exception as e: await client.send_message(Config.LOG_CHANNEL_ID, f"❌ Failed to intercept: {str(e)}")
+        except: pass
         finally:
             if file_path and os.path.exists(file_path): os.remove(file_path)
 
@@ -222,153 +344,15 @@ async def log_deleted(client, messages):
                 await asyncio.sleep(1.5)
 
 # =================================================================
-# ⚙️ SYSTEM, UTILITIES & AI
+# 🎬 VOLUME 1: MEDIA, LEECHING & UTILITIES
 # =================================================================
 
-@bot.on_message(filters.me & filters.command("info", prefixes="."))
-async def deep_inspector(client, message):
-    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
-    if not target: 
-        msg = await message.edit_text("⚠️ Cannot fetch info.")
-        return asyncio.create_task(auto_delete(msg))
-    dc_id = target.dc_id or "Unknown"
-    status = "Restricted" if target.is_restricted else "Clean"
-    bot_status = "Yes" if target.is_bot else "No"
-    
-    text = (
-        f"🕵️ **Deep Look Inspector**\n\n"
-        f"👤 **Name:** {target.first_name}\n"
-        f"🆔 **Permanent ID:** `{target.id}`\n"
-        f"🌐 **Data Center:** `DC {dc_id}`\n"
-        f"🤖 **Is Bot:** `{bot_status}`\n"
-        f"🛡️ **Status:** `{status}`\n"
-        f"🔗 **Profile:** [Link](tg://user?id={target.id})"
-    )
-    msg = await message.edit_text(text)
-    asyncio.create_task(auto_delete(msg, 20))
-
-@bot.on_message(filters.me & filters.command("clean", prefixes="."))
-async def clean_url(client, message):
-    if len(message.command) < 2 and not message.reply_to_message:
-        msg = await message.edit_text("⚠️ Provide a messy link or reply to one.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    text = message.text.split(" ", 1)[1] if len(message.command) > 1 else message.reply_to_message.text
-    urls = re.findall(r'(https?://[^\s]+)', text)
-    if not urls:
-        msg = await message.edit_text("⚠️ No URLs found.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    url = urls[0]
-    await message.edit_text("🔗 Unshortening and stripping trackers...")
-    try:
-        res = requests.get(url, allow_redirects=True, timeout=10)
-        parsed = urllib.parse.urlparse(res.url)
-        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        msg = await message.edit_text(f"✅ **Clean Link:**\n`{clean}`")
-    except Exception as e:
-        msg = await message.edit_text(f"❌ Failed: {str(e)}")
-    asyncio.create_task(auto_delete(msg, 15))
-
-@bot.on_message(filters.me & filters.command("sys", prefixes="."))
-async def system_health(client, message):
-    msg = await message.edit_text(f"🖥 **Server Health Matrix**\n\n🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n💽 **RAM:** `{psutil.virtual_memory().percent}%`\n💾 **Disk:** `{psutil.disk_usage('/').percent}%`\n\n🛡 **System:** `Render Docker`")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("eval", prefixes="."))
-async def live_eval(client, message):
-    if len(message.command) < 2: 
-        msg = await message.edit_text("⚠️ Provide code.")
-        return asyncio.create_task(auto_delete(msg))
-    code = message.text.split(" ", 1)[1]
-    await message.edit_text("⚙️ Executing...")
-    old_stdout, sys.stdout = sys.stdout, io.StringIO()
-    try:
-        exec(code)
-        output = sys.stdout.getvalue()
-    except Exception as e: output = str(e)
-    finally: sys.stdout = old_stdout
-    msg = await message.edit_text(f"💻 **Input:**\n`{code}`\n\n📤 **Output:**\n`{output or 'Success (No Output)'}`")
-    asyncio.create_task(auto_delete(msg))
-
-# =================================================================
-# 🎬 MEDIA, FORMAT SHIFTING & LEECHING
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("mp3", prefixes="."))
-async def convert_to_mp3(client, message):
-    if not message.reply_to_message or not message.reply_to_message.media:
-        msg = await message.edit_text("⚠️ Reply to a video or audio file.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    status = await message.edit_text("📥 Downloading media...")
-    try:
-        path = await message.reply_to_message.download()
-        out_path = path + ".mp3"
-        await status.edit_text("⚙️ Ripping raw audio track via FFmpeg...")
-        os.system(f'ffmpeg -i "{path}" -q:a 0 -map a "{out_path}" -y')
-        
-        await status.edit_text("📤 Uploading MP3...")
-        await client.send_audio(message.chat.id, out_path, reply_to_message_id=message.reply_to_message.id)
-        await status.delete()
-    except Exception as e:
-        msg = await status.edit_text(f"❌ Error: {str(e)}")
-        asyncio.create_task(auto_delete(msg))
-    finally:
-        if 'path' in locals() and os.path.exists(path): os.remove(path)
-        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
-
-@bot.on_message(filters.me & filters.command("gif", prefixes="."))
-async def convert_to_gif(client, message):
-    if not message.reply_to_message or not message.reply_to_message.video:
-        msg = await message.edit_text("⚠️ Reply to a video file.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    status = await message.edit_text("📥 Downloading video...")
-    try:
-        path = await message.reply_to_message.download()
-        out_path = path + "_mute.mp4"
-        await status.edit_text("⚙️ Stripping audio for Telegram GIF...")
-        os.system(f'ffmpeg -i "{path}" -an -c:v copy "{out_path}" -y')
-        
-        await status.edit_text("📤 Uploading GIF...")
-        await client.send_video(message.chat.id, out_path, disable_notification=True, reply_to_message_id=message.reply_to_message.id)
-        await status.delete()
-    except Exception as e:
-        msg = await status.edit_text(f"❌ Error: {str(e)}")
-        asyncio.create_task(auto_delete(msg))
-    finally:
-        if 'path' in locals() and os.path.exists(path): os.remove(path)
-        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
-
-TARGET_BOT = "@NxSFW_3Bot"
-
-@bot.on_message(filters.me & filters.command("lkm", prefixes="."))
-async def leech_movie(client, message):
-    if len(message.command) > 1:
-        await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -ff fix")
-    else: 
-        msg = await message.edit_text("⚠️ Usage: `.lkm [link]`")
-        asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("lks", prefixes="."))
-async def leech_series(client, message):
-    if len(message.command) > 1:
-        await message.delete()
-        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -e -ff fix")
-    else: 
-        msg = await message.edit_text("⚠️ Usage: `.lks [link]`")
-        asyncio.create_task(auto_delete(msg))
-
-# --- FIXED: RESTRICTED CONTENT SAVER (.dl) ---
 @bot.on_message(filters.me & filters.command("dl", prefixes="."))
 async def save_restricted(client, message):
     if not message.reply_to_message or not message.reply_to_message.media:
         msg = await message.edit_text("⚠️ Reply to restricted media with `.dl`")
         return asyncio.create_task(auto_delete(msg))
     
-    # Pre-wipe to ensure we have disk space
     if os.path.exists("downloads"):
         try: shutil.rmtree("downloads")
         except: pass
@@ -395,7 +379,6 @@ async def save_restricted(client, message):
         msg = await status_msg.edit_text(f"❌ Error: {str(e)}")
         asyncio.create_task(auto_delete(msg))
     finally:
-        # Aggressive post-download nuke to keep the server healthy
         if 'file_path' in locals() and file_path and os.path.exists(file_path): 
             try: os.remove(file_path)
             except: pass
@@ -403,196 +386,25 @@ async def save_restricted(client, message):
             try: shutil.rmtree("downloads")
             except: pass
 
-# =================================================================
-# 🎭 CHAT FLEX, STATUS & GHOSTING
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("d", prefixes="."))
-async def self_destruct_nuke(client, message):
-    if len(message.command) < 3:
-        msg = await message.edit_text("⚠️ Usage: `.d [seconds] [message]`")
+@bot.on_message(filters.me & filters.command("clean", prefixes="."))
+async def clean_url(client, message):
+    text = message.text.split(" ", 1)[1] if len(message.command) > 1 else (message.reply_to_message.text if message.reply_to_message else "")
+    urls = re.findall(r'(https?://[^\s]+)', text)
+    if not urls:
+        msg = await message.edit_text("⚠️ No URLs found.")
         return asyncio.create_task(auto_delete(msg))
-        
+    await message.edit_text("🔗 Unshortening...")
     try:
-        sec = int(message.command[1])
-        if sec > 60: sec = 60
-        text = message.text.split(" ", 2)[2]
-    except:
-        msg = await message.edit_text("⚠️ Invalid time format. Use: `.d 15 My message`")
-        return asyncio.create_task(auto_delete(msg))
-        
-    for i in range(sec, 0, -1):
-        try:
-            await message.edit_text(f"{text}\n\n⏳ `{i}s`")
-            await asyncio.sleep(1)
-        except: pass
-    
-    await message.delete()
+        res = requests.get(urls[0], allow_redirects=True, timeout=10)
+        parsed = urllib.parse.urlparse(res.url)
+        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        msg = await message.edit_text(f"✅ **Clean Link:**\n`{clean}`")
+    except Exception as e: msg = await message.edit_text(f"❌ Failed: {str(e)}")
+    asyncio.create_task(auto_delete(msg, 15))
 
-@bot.on_message(filters.me & filters.command("ghost", prefixes="."))
-async def ghost_action_spammer(client, message):
-    if len(message.command) < 3:
-        msg = await message.edit_text("⚠️ Usage: `.ghost [typing/recording/video] [seconds]`")
-        return asyncio.create_task(auto_delete(msg))
-        
-    action_str = message.command[1].lower()
-    try: 
-        sec = int(message.command[2])
-        if sec > 300: sec = 300
-    except: 
-        msg = await message.edit_text("⚠️ Invalid seconds.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    action_map = {"typing": ChatAction.TYPING, "recording": ChatAction.RECORD_AUDIO, "video": ChatAction.RECORD_VIDEO}
-    action = action_map.get(action_str, ChatAction.TYPING)
-    
-    await message.delete()
-    
-    for _ in range(sec // 5 + 1):
-        try:
-            await client.send_chat_action(message.chat.id, action)
-            await asyncio.sleep(min(5, sec))
-            sec -= 5
-            if sec <= 0: break
-        except: break
-
-@bot.on_message(filters.me & filters.command("afk", prefixes="."))
-async def go_afk(client, message):
-    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently AFK. Might be slow to reply."
-    bot_state["afk_general"], bot_state["focus_coding"], bot_state["status_message"] = True, False, reason
-    msg = await message.edit_text(f"🚶 **AFK Mode ON:** {reason}")
+@bot.on_message(filters.me & filters.command("sys", prefixes="."))
+async def system_health(client, message):
+    msg = await message.edit_text(f"🖥 **Server Health Matrix**\n\n🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n💽 **RAM:** `{psutil.virtual_memory().percent}%`\n💾 **Disk:** `{psutil.disk_usage('/').percent}%`\n\n🛡 **System:** `Render Docker`")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_message(filters.me & filters.command("code", prefixes="."))
-async def go_code(client, message):
-    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently in deep coding flow. Do not disturb."
-    bot_state["focus_coding"], bot_state["afk_general"], bot_state["status_message"] = True, False, reason
-    msg = await message.edit_text(f"💻 **Code Flow Mode ON:** {reason}")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.private & ~filters.me, group=1)
-async def auto_reply(client, message):
-    if bot_state["focus_coding"]: await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
-    elif bot_state["afk_general"]: await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
-
-@bot.on_message(filters.me, group=2)
-async def auto_turn_off(client, message):
-    text = message.text or message.caption or ""
-    if (bot_state["focus_coding"] or bot_state["afk_general"]) and not text.startswith((".", "/")):
-        bot_state["focus_coding"] = bot_state["afk_general"] = False
-        notif = await client.send_message(message.chat.id, "Welcome back! Status is now **OFF**.")
-        asyncio.create_task(auto_delete(notif, 3))
-
-# =================================================================
-# 🧹 PURGE & TOOLS
-# =================================================================
-
-@bot.on_message(filters.me & filters.command("purge", prefixes="."))
-async def ghost_purge(client, message):
-    if not message.reply_to_message: 
-        msg = await message.edit_text("⚠️ Reply to a message to purge.")
-        return asyncio.create_task(auto_delete(msg))
-    
-    start_id = message.reply_to_message.id
-    await message.edit_text("🧹 Scanning chat history...")
-    msgs_to_delete = []
-    
-    async for m in client.get_chat_history(message.chat.id):
-        if m.id < start_id: break
-        if m.from_user and m.from_user.is_self: msgs_to_delete.append(m.id)
-            
-    if not msgs_to_delete: 
-        msg = await message.edit_text("⚠️ No messages found to delete.")
-        return asyncio.create_task(auto_delete(msg))
-        
-    for i in range(0, len(msgs_to_delete), 100):
-        batch = msgs_to_delete[i:i+100]
-        try:
-            await client.delete_messages(message.chat.id, batch)
-            await asyncio.sleep(0.5)
-        except: pass
-
-@bot.on_message(filters.me & filters.command("ping", prefixes="."))
-async def animated_ping(client, message):
-    start = time.time()
-    for f in ["Pinging... ⬛️⬜️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬛️"]:
-        try:
-            await message.edit_text(f)
-            await asyncio.sleep(0.1)
-        except: pass
-    msg = await message.edit_text(f"🚀 **Userbot Online!**\n⚡️ **Latency:** `{round((time.time() - start) * 1000)}ms`\n🛡 **System:** `Render`")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("scraped", prefixes="."))
-async def count_scrape(client, message):
-    bot_state["stremio_scrapes"] += 1
-    msg = await message.edit_text(f"✅ Library updated. Scrapes: {bot_state['stremio_scrapes']}")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("tr", prefixes="."))
-async def translate_text(client, message):
-    if not message.reply_to_message or not message.reply_to_message.text: 
-        msg = await message.edit_text("⚠️ Reply to a text.")
-        return asyncio.create_task(auto_delete(msg))
-    target_lang = message.command[1] if len(message.command) > 1 else "en"
-    await message.edit_text("🔄 Translating...")
-    try:
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(message.reply_to_message.text)
-        msg = await message.edit_text(f"🌍 **Translation ({target_lang}):**\n`{translated}`")
-    except Exception as e: 
-        msg = await message.edit_text(f"❌ Error: {e}")
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("q", prefixes="."))
-async def quote_maker(client, message):
-    if not message.reply_to_message: 
-        msg = await message.edit_text("⚠️ Reply to a message.")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("🎨 Generating sticker...")
-    await message.reply_to_message.forward("@QuotLyBot")
-    await asyncio.sleep(3)
-    async for sticker in client.get_chat_history("@QuotLyBot", limit=1):
-        if sticker.sticker:
-            await client.send_sticker(message.chat.id, sticker.sticker.file_id)
-            await message.delete()
-            break
-
-@bot.on_message(filters.me & filters.command("ocr", prefixes="."))
-async def extract_text_from_image(client, message):
-    if not message.reply_to_message or not message.reply_to_message.photo: 
-        msg = await message.edit_text("⚠️ Reply to an image.")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("👁️ Scanning document...")
-    file_path = await message.reply_to_message.download()
-    try:
-        extracted = pytesseract.image_to_string(Image.open(file_path))
-        if not extracted.strip(): msg = await message.edit_text("❌ No text found.")
-        else: msg = await message.edit_text(f"📝 **Extracted:**\n\n`{extracted}`")
-    finally: os.remove(file_path)
-    asyncio.create_task(auto_delete(msg))
-
-@bot.on_message(filters.me & filters.command("vt", prefixes="."))
-async def transcribe_voice(client, message):
-    if not message.reply_to_message or not message.reply_to_message.voice:
-        msg = await message.edit_text("⚠️ Reply to a voice note with `.vt`")
-        return asyncio.create_task(auto_delete(msg))
-    await message.edit_text("🎙️ Processing...")
-    file_path = await message.reply_to_message.download()
-    try:
-        wav_path = file_path + ".wav"
-        AudioSegment.from_file(file_path).export(wav_path, format="wav")
-        r = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            text = r.recognize_google(r.record(source))
-        msg = await message.edit_text(f"📝 **Transcription:**\n\n`{text}`")
-    except Exception as e:
-        msg = await message.edit_text(f"❌ Transcription failed: {str(e)}")
-    finally:
-        if os.path.exists(file_path): os.remove(file_path)
-        if 'wav_path' in locals() and os.path.exists(wav_path): os.remove(wav_path)
-    asyncio.create_task(auto_delete(msg))
-
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    print("🔒 Pro Max Server Engine Online!")
-    bot.run()
+@bot.on_me
