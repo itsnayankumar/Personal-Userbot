@@ -407,4 +407,252 @@ async def system_health(client, message):
     msg = await message.edit_text(f"🖥 **Server Health Matrix**\n\n🧠 **CPU:** `{psutil.cpu_percent(interval=0.5)}%`\n💽 **RAM:** `{psutil.virtual_memory().percent}%`\n💾 **Disk:** `{psutil.disk_usage('/').percent}%`\n\n🛡 **System:** `Render Docker`")
     asyncio.create_task(auto_delete(msg))
 
-@bot.on_me
+@bot.on_message(filters.me & filters.command("eval", prefixes="."))
+async def live_eval(client, message):
+    if len(message.command) < 2: 
+        msg = await message.edit_text("⚠️ Provide code.")
+        return asyncio.create_task(auto_delete(msg))
+    code = message.text.split(" ", 1)[1]
+    await message.edit_text("⚙️ Executing...")
+    old_stdout, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        exec(code)
+        output = sys.stdout.getvalue()
+    except Exception as e: output = str(e)
+    finally: sys.stdout = old_stdout
+    msg = await message.edit_text(f"💻 **Input:**\n`{code}`\n\n📤 **Output:**\n`{output or 'Success (No Output)'}`")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("mp3", prefixes="."))
+async def convert_to_mp3(client, message):
+    if not message.reply_to_message or not message.reply_to_message.media:
+        msg = await message.edit_text("⚠️ Reply to a video or audio file.")
+        return asyncio.create_task(auto_delete(msg))
+    status = await message.edit_text("📥 Downloading media...")
+    try:
+        path = await message.reply_to_message.download()
+        out_path = path + ".mp3"
+        await status.edit_text("⚙️ Ripping raw audio track via FFmpeg...")
+        os.system(f'ffmpeg -i "{path}" -q:a 0 -map a "{out_path}" -y')
+        await status.edit_text("📤 Uploading MP3...")
+        await client.send_audio(message.chat.id, out_path, reply_to_message_id=message.reply_to_message.id)
+        await status.delete()
+    except Exception as e:
+        msg = await status.edit_text(f"❌ Error: {str(e)}")
+        asyncio.create_task(auto_delete(msg))
+    finally:
+        if 'path' in locals() and os.path.exists(path): os.remove(path)
+        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
+
+@bot.on_message(filters.me & filters.command("gif", prefixes="."))
+async def convert_to_gif(client, message):
+    if not message.reply_to_message or not message.reply_to_message.video:
+        msg = await message.edit_text("⚠️ Reply to a video file.")
+        return asyncio.create_task(auto_delete(msg))
+    status = await message.edit_text("📥 Downloading video...")
+    try:
+        path = await message.reply_to_message.download()
+        out_path = path + "_mute.mp4"
+        await status.edit_text("⚙️ Stripping audio for Telegram GIF...")
+        os.system(f'ffmpeg -i "{path}" -an -c:v copy "{out_path}" -y')
+        await status.edit_text("📤 Uploading GIF...")
+        await client.send_video(message.chat.id, out_path, disable_notification=True, reply_to_message_id=message.reply_to_message.id)
+        await status.delete()
+    except Exception as e:
+        msg = await status.edit_text(f"❌ Error: {str(e)}")
+        asyncio.create_task(auto_delete(msg))
+    finally:
+        if 'path' in locals() and os.path.exists(path): os.remove(path)
+        if 'out_path' in locals() and os.path.exists(out_path): os.remove(out_path)
+
+TARGET_BOT = "@NxSFW_3Bot"
+
+@bot.on_message(filters.me & filters.command("lkm", prefixes="."))
+async def leech_movie(client, message):
+    if len(message.command) > 1:
+        await message.delete()
+        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -ff fix")
+    else: 
+        msg = await message.edit_text("⚠️ Usage: `.lkm [link]`")
+        asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("lks", prefixes="."))
+async def leech_series(client, message):
+    if len(message.command) > 1:
+        await message.delete()
+        await client.send_message(TARGET_BOT, f"/l2 {message.text.split(' ', 1)[1]} -e -ff fix")
+    else: 
+        msg = await message.edit_text("⚠️ Usage: `.lks [link]`")
+        asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("d", prefixes="."))
+async def self_destruct_nuke(client, message):
+    if len(message.command) < 3:
+        msg = await message.edit_text("⚠️ Usage: `.d [seconds] [message]`")
+        return asyncio.create_task(auto_delete(msg))
+    try:
+        sec = int(message.command[1])
+        if sec > 60: sec = 60
+        text = message.text.split(" ", 2)[2]
+    except:
+        msg = await message.edit_text("⚠️ Invalid time format. Use: `.d 15 My message`")
+        return asyncio.create_task(auto_delete(msg))
+    for i in range(sec, 0, -1):
+        try:
+            await message.edit_text(f"{text}\n\n⏳ `{i}s`")
+            await asyncio.sleep(1)
+        except: pass
+    await message.delete()
+
+@bot.on_message(filters.me & filters.command("ghost", prefixes="."))
+async def ghost_action_spammer(client, message):
+    if len(message.command) < 3:
+        msg = await message.edit_text("⚠️ Usage: `.ghost [typing/recording/video] [seconds]`")
+        return asyncio.create_task(auto_delete(msg))
+    action_str = message.command[1].lower()
+    try: 
+        sec = int(message.command[2])
+        if sec > 300: sec = 300
+    except: 
+        msg = await message.edit_text("⚠️ Invalid seconds.")
+        return asyncio.create_task(auto_delete(msg))
+    action_map = {"typing": ChatAction.TYPING, "recording": ChatAction.RECORD_AUDIO, "video": ChatAction.RECORD_VIDEO}
+    action = action_map.get(action_str, ChatAction.TYPING)
+    await message.delete()
+    for _ in range(sec // 5 + 1):
+        try:
+            await client.send_chat_action(message.chat.id, action)
+            await asyncio.sleep(min(5, sec))
+            sec -= 5
+            if sec <= 0: break
+        except: break
+
+@bot.on_message(filters.me & filters.command("afk", prefixes="."))
+async def go_afk(client, message):
+    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently AFK. Might be slow to reply."
+    bot_state["afk_general"], bot_state["focus_coding"], bot_state["status_message"] = True, False, reason
+    msg = await message.edit_text(f"🚶 **AFK Mode ON:** {reason}")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("code", prefixes="."))
+async def go_code(client, message):
+    reason = message.text.split(" ", 1)[1] if len(message.command) > 1 else "Currently in deep coding flow. Do not disturb."
+    bot_state["focus_coding"], bot_state["afk_general"], bot_state["status_message"] = True, False, reason
+    msg = await message.edit_text(f"💻 **Code Flow Mode ON:** {reason}")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.private & ~filters.me, group=1)
+async def auto_reply(client, message):
+    if bot_state["focus_coding"]: await message.reply_text(f"💻 **Auto-Reply:**\n{bot_state['status_message']}")
+    elif bot_state["afk_general"]: await message.reply_text(f"🚶 **Auto-Reply:**\n{bot_state['status_message']}")
+
+@bot.on_message(filters.me, group=2)
+async def auto_turn_off(client, message):
+    text = message.text or message.caption or ""
+    if (bot_state["focus_coding"] or bot_state["afk_general"]) and not text.startswith((".", "/")):
+        bot_state["focus_coding"] = bot_state["afk_general"] = False
+        notif = await client.send_message(message.chat.id, "Welcome back! Status is now **OFF**.")
+        asyncio.create_task(auto_delete(notif, 3))
+
+@bot.on_message(filters.me & filters.command("purge", prefixes="."))
+async def ghost_purge(client, message):
+    if not message.reply_to_message: 
+        msg = await message.edit_text("⚠️ Reply to a message to purge.")
+        return asyncio.create_task(auto_delete(msg))
+    start_id = message.reply_to_message.id
+    await message.edit_text("🧹 Scanning chat history...")
+    msgs_to_delete = []
+    async for m in client.get_chat_history(message.chat.id):
+        if m.id < start_id: break
+        if m.from_user and m.from_user.is_self: msgs_to_delete.append(m.id)
+    if not msgs_to_delete: 
+        msg = await message.edit_text("⚠️ No messages found to delete.")
+        return asyncio.create_task(auto_delete(msg))
+    for i in range(0, len(msgs_to_delete), 100):
+        batch = msgs_to_delete[i:i+100]
+        try:
+            await client.delete_messages(message.chat.id, batch)
+            await asyncio.sleep(0.5)
+        except: pass
+
+@bot.on_message(filters.me & filters.command("ping", prefixes="."))
+async def animated_ping(client, message):
+    start = time.time()
+    for f in ["Pinging... ⬛️⬜️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬜️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬜️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬜️", "Pinging... ⬛️⬛️⬛️⬛️⬛️"]:
+        try:
+            await message.edit_text(f)
+            await asyncio.sleep(0.1)
+        except: pass
+    msg = await message.edit_text(f"🚀 **Userbot Online!**\n⚡️ **Latency:** `{round((time.time() - start) * 1000)}ms`\n🛡 **System:** `Render`")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("scraped", prefixes="."))
+async def count_scrape(client, message):
+    bot_state["stremio_scrapes"] += 1
+    msg = await message.edit_text(f"✅ Library updated. Scrapes: {bot_state['stremio_scrapes']}")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("tr", prefixes="."))
+async def translate_text(client, message):
+    if not message.reply_to_message or not message.reply_to_message.text: 
+        msg = await message.edit_text("⚠️ Reply to a text.")
+        return asyncio.create_task(auto_delete(msg))
+    target_lang = message.command[1] if len(message.command) > 1 else "en"
+    await message.edit_text("🔄 Translating...")
+    try:
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(message.reply_to_message.text)
+        msg = await message.edit_text(f"🌍 **Translation ({target_lang}):**\n`{translated}`")
+    except Exception as e: msg = await message.edit_text(f"❌ Error: {e}")
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("q", prefixes="."))
+async def quote_maker(client, message):
+    if not message.reply_to_message: 
+        msg = await message.edit_text("⚠️ Reply to a message.")
+        return asyncio.create_task(auto_delete(msg))
+    await message.edit_text("🎨 Generating sticker...")
+    await message.reply_to_message.forward("@QuotLyBot")
+    await asyncio.sleep(3)
+    async for sticker in client.get_chat_history("@QuotLyBot", limit=1):
+        if sticker.sticker:
+            await client.send_sticker(message.chat.id, sticker.sticker.file_id)
+            await message.delete()
+            break
+
+@bot.on_message(filters.me & filters.command("ocr", prefixes="."))
+async def extract_text_from_image(client, message):
+    if not message.reply_to_message or not message.reply_to_message.photo: 
+        msg = await message.edit_text("⚠️ Reply to an image.")
+        return asyncio.create_task(auto_delete(msg))
+    await message.edit_text("👁️ Scanning document...")
+    file_path = await message.reply_to_message.download()
+    try:
+        extracted = pytesseract.image_to_string(Image.open(file_path))
+        if not extracted.strip(): msg = await message.edit_text("❌ No text found.")
+        else: msg = await message.edit_text(f"📝 **Extracted:**\n\n`{extracted}`")
+    finally: os.remove(file_path)
+    asyncio.create_task(auto_delete(msg))
+
+@bot.on_message(filters.me & filters.command("vt", prefixes="."))
+async def transcribe_voice(client, message):
+    if not message.reply_to_message or not message.reply_to_message.voice:
+        msg = await message.edit_text("⚠️ Reply to a voice note with `.vt`")
+        return asyncio.create_task(auto_delete(msg))
+    await message.edit_text("🎙️ Processing...")
+    file_path = await message.reply_to_message.download()
+    try:
+        wav_path = file_path + ".wav"
+        AudioSegment.from_file(file_path).export(wav_path, format="wav")
+        r = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source: text = r.recognize_google(r.record(source))
+        msg = await message.edit_text(f"📝 **Transcription:**\n\n`{text}`")
+    except Exception as e: msg = await message.edit_text(f"❌ Transcription failed: {str(e)}")
+    finally:
+        if os.path.exists(file_path): os.remove(file_path)
+        if 'wav_path' in locals() and os.path.exists(wav_path): os.remove(wav_path)
+    asyncio.create_task(auto_delete(msg))
+
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
+    print("🔒 Pro Max Server Engine Online!")
+    bot.run()
